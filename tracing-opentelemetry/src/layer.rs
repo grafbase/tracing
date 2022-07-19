@@ -1,12 +1,17 @@
 use crate::{OtelData, PreSampledTracer};
+use instant::{Duration, Instant};
 use opentelemetry::{
-    trace::{self as otel, noop, TraceContextExt},
+    trace::{self as otel, noop, Span, TraceContextExt},
     Context as OtelContext, Key, KeyValue,
 };
 use std::any::TypeId;
 use std::fmt;
 use std::marker;
-use std::time::{Instant, SystemTime};
+use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, RwLock};
+use std::time::SystemTime;
+use worker::{self as _, console_log};
+
 use tracing_core::span::{self, Attributes, Id, Record};
 use tracing_core::{field, Event, Subscriber};
 #[cfg(feature = "tracing-log")]
@@ -26,6 +31,9 @@ const SPAN_STATUS_MESSAGE_FIELD: &str = "otel.status_message";
 /// [OpenTelemetry]: https://opentelemetry.io
 /// [tracing]: https://github.com/tokio-rs/tracing
 pub struct OpenTelemetryLayer<S, T> {
+    elapsed: Arc<AtomicU32>,
+    starting: RwLock<Instant>,
+
     tracer: T,
     tracked_inactivity: bool,
     get_context: WithContext,
@@ -287,12 +295,53 @@ where
     /// # drop(subscriber);
     /// ```
     pub fn new(tracer: T) -> Self {
-        OpenTelemetryLayer {
+        let elapsed = Arc::new(AtomicU32::new(0));
+        let layer = OpenTelemetryLayer {
+            elapsed,
+            starting: RwLock::new(Instant::now()),
             tracer,
             tracked_inactivity: true,
             get_context: WithContext(Self::get_context),
             _registry: marker::PhantomData,
+        };
+
+        // Due to Cloudflare not giving us any time-data from the worker, we need
+        // to create an artificial elapsed time.
+        // From the measurement, we have a deviation from +/- 1ms, which is really good.
+        let elapsed_cloned = Arc::clone(&layer.elapsed);
+        let timeout = gloo_timers::callback::Interval::new(1, move || {
+            elapsed_cloned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        timeout.forget();
+
+        layer
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn systemtime_now(&self) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from(self.instant_now())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn systemtime_now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+
+    pub fn instant_now(&self) -> Instant {
+        let instant_from_env = Instant::now();
+        let s = self.starting.try_read().expect("blbl");
+        if *s < instant_from_env {
+            drop(s);
+            let mut write_lock = self.starting.try_write().expect("blbl");
+            *write_lock = instant_from_env;
+            self.elapsed.store(0, std::sync::atomic::Ordering::SeqCst);
+            return instant_from_env;
         }
+
+        *s + Duration::new(
+            0,
+            self.elapsed.load(std::sync::atomic::Ordering::SeqCst) * 1_000_000,
+        )
     }
 
     /// Set the [`Tracer`] that this layer will use to produce and track
@@ -326,6 +375,8 @@ where
         Tracer: otel::Tracer + PreSampledTracer + 'static,
     {
         OpenTelemetryLayer {
+            elapsed: self.elapsed,
+            starting: self.starting,
             tracer,
             tracked_inactivity: self.tracked_inactivity,
             get_context: WithContext(OpenTelemetryLayer::<S, Tracer>::get_context),
@@ -411,14 +462,15 @@ where
         let mut extensions = span.extensions_mut();
 
         if self.tracked_inactivity && extensions.get_mut::<Timings>().is_none() {
-            extensions.insert(Timings::new());
+            let now = self.instant_now();
+            extensions.insert(Timings::new(now));
         }
 
         let parent_cx = self.parent_context(attrs, &ctx);
         let mut builder = self
             .tracer
             .span_builder(attrs.metadata().name())
-            .with_start_time(SystemTime::now())
+            .with_start_time(self.systemtime_now())
             // Eagerly assign span id so children have stable parent id
             .with_span_id(self.tracer.new_span_id());
 
@@ -458,7 +510,7 @@ where
         let mut extensions = span.extensions_mut();
 
         if let Some(timings) = extensions.get_mut::<Timings>() {
-            let now = Instant::now();
+            let now = self.instant_now();
             timings.idle += (now - timings.last).as_nanos() as i64;
             timings.last = now;
         }
@@ -473,7 +525,7 @@ where
         let mut extensions = span.extensions_mut();
 
         if let Some(timings) = extensions.get_mut::<Timings>() {
-            let now = Instant::now();
+            let now = self.instant_now();
             timings.busy += (now - timings.last).as_nanos() as i64;
             timings.last = now;
         }
@@ -490,7 +542,7 @@ where
         }
     }
 
-    fn on_follows_from(&self, id: &Id, follows: &Id, ctx: Context<S>) {
+    fn on_follows_from(&self, id: &Id, follows: &Id, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("Span not found, this is a bug");
         let mut extensions = span.extensions_mut();
         let data = extensions
@@ -528,6 +580,7 @@ where
     /// [`ERROR`]: tracing::Level::ERROR
     /// [`Error`]: opentelemetry::trace::StatusCode::Error
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        console_log!("Event: {:?}", event);
         // Ignore events that are not in the context of a span
         if let Some(span) = ctx.lookup_current() {
             // Performing read operations before getting a write lock to avoid a deadlock
@@ -540,7 +593,7 @@ where
             let meta = event.metadata();
             let mut otel_event = otel::Event::new(
                 String::new(),
-                SystemTime::now(),
+                self.systemtime_now(),
                 vec![
                     Key::new("level").string(meta.level().to_string()),
                     Key::new("target").string(meta.target().to_string()),
@@ -554,6 +607,8 @@ where
                 if builder.status_code.is_none() && *meta.level() == tracing_core::Level::ERROR {
                     builder.status_code = Some(otel::StatusCode::Error);
                 }
+
+                console_log!("Event: {:?}", otel_event);
 
                 if let Some(ref mut events) = builder.events {
                     events.push(otel_event);
@@ -593,8 +648,9 @@ where
 
             // Assign end time, build and start span, drop span to export
             builder
-                .with_end_time(SystemTime::now())
-                .start_with_context(&self.tracer, &parent_cx);
+                .with_end_time(self.systemtime_now())
+                .start_with_context(&self.tracer, &parent_cx)
+                .end();
         }
     }
 
@@ -611,6 +667,7 @@ where
     }
 }
 
+#[derive(Debug)]
 struct Timings {
     idle: i64,
     busy: i64,
@@ -618,11 +675,11 @@ struct Timings {
 }
 
 impl Timings {
-    fn new() -> Self {
+    fn new(last: Instant) -> Self {
         Self {
             idle: 0,
             busy: 0,
-            last: Instant::now(),
+            last,
         }
     }
 }
