@@ -23,7 +23,7 @@ rust-version = "1.46.0"
 default = ["tracing-log"]
 
 [dependencies]
-opentelemetry = { version = "0.17", default-features = false, features = ["trace"] }
+opentelemetry = { version = "0.17", package = "opentelemetry-spanprocessor-any", default-features = false, features = ["trace"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-core = { version = "0.1" }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
