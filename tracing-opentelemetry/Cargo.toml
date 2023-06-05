@@ -29,7 +29,7 @@ tracing-core = { version = "0.1" }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 tracing-log = { version = "0.1", default-features = false, optional = true }
 instant = { git = "https://github.com/grafbase/instant", branch = "gb-3211-tracing_logging_panics", features = [ "wasm-bindgen", "inaccurate" ] }
-worker = "0.0.16"
+worker = "0.0.17"
 gloo-timers = "0.2"
 
 
