@@ -23,7 +23,9 @@ rust-version = "1.46.0"
 default = ["tracing-log"]
 
 [dependencies]
-opentelemetry = { version = "0.17", package = "opentelemetry-spanprocessor-any", default-features = false, features = ["trace"] }
+opentelemetry = { git = "https://github.com/grafbase/opentelemetry-rust", rev = "0090eb6360104589313b78749ce6c3d1f81e1b99", features = [
+  "trace",
+], default-features = false } # 0.17.0-send-wrapper-as-any
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-core = { version = "0.1" }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
