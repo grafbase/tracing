@@ -23,7 +23,7 @@ rust-version = "1.46.0"
 default = ["tracing-log"]
 
 [dependencies]
-opentelemetry = { git = "https://github.com/grafbase/opentelemetry-rust", rev = "0090eb6360104589313b78749ce6c3d1f81e1b99", features = [
+opentelemetry = { git = "https://github.com/grafbase/opentelemetry-rust", rev = "36715f8e75282570a9e7fadff0d2abfe8604b7df", features = [
   "trace",
 ], default-features = false } # 0.17.0-send-wrapper-as-any
 tracing = { version = "0.1", default-features = false, features = ["std"] }
